@@ -1,0 +1,23 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+
+# Go workspace
+go.work
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Internal temporary tooling and caches
+.superpowers/
