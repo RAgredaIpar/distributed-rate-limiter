@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package ratelimit.v1;
+
+option go_package = "github.com/distributed-rate-limiter/proto/ratelimit/v1;ratelimitv1";
+
+// Criticality specifies the priority of the request.
+enum Criticality {
+  CRITICALITY_UNSPECIFIED = 0;
+  CRITICALITY_STANDARD = 1;
+  CRITICALITY_CRITICAL = 2;
+}
+
+// Tier identifies which layer served the rate limit decision.
+enum Tier {
+  TIER_UNSPECIFIED = 0;
+  TIER_LOCAL = 1;
+  TIER_REDIS = 2;
+  TIER_FALLBACK = 3;
+}
+
+// CheckRequest is the payload sent to check if an operation is allowed.
+message CheckRequest {
+  string key = 1;
+  int64 cost = 2;
+  int64 capacity = 3;
+  double refill_rate = 4;
+  int64 batch_size = 5;
+  Criticality criticality = 6;
+}
+
+// CheckResponse contains the rate limiting decision and remaining quota.
+message CheckResponse {
+  bool allowed = 1;
+  int64 remaining = 2;
+  int64 reset_duration_ms = 3;
+  Tier served_by = 4;
+  string reason = 5;
+}
+
+// RateLimiter service definition for distributed high-throughput rate checks.
+service RateLimiter {
+  // Check evaluates whether a request should be permitted or rate limited.
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
