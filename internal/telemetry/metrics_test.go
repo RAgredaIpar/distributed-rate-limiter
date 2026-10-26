@@ -123,6 +123,10 @@ func TestCircuitBreakerStateTransitions(t *testing.T) {
 }
 
 func TestDefaultConstructor(t *testing.T) {
+	orig := prometheus.DefaultRegisterer
+	prometheus.DefaultRegisterer = prometheus.NewRegistry()
+	defer func() { prometheus.DefaultRegisterer = orig }()
+
 	collector := NewMetricsCollector()
 	if collector == nil {
 		t.Fatalf("expected NewMetricsCollector to return non-nil instance")

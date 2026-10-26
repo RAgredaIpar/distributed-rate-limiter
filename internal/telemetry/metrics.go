@@ -53,6 +53,8 @@ func NewMetricsCollectorWithRegistry(reg prometheus.Registerer) *MetricsCollecto
 	}
 }
 
+var allBreakerStates = []core.BreakerState{core.StateClosed, core.StateOpen, core.StateHalfOpen}
+
 // ObserveDecision records decision count and execution latency for a rate-limiting evaluation.
 func (m *MetricsCollector) ObserveDecision(tier core.Tier, allowed bool, duration time.Duration) {
 	m.requestsTotal.WithLabelValues(string(tier), strconv.FormatBool(allowed)).Inc()
@@ -62,8 +64,7 @@ func (m *MetricsCollector) ObserveDecision(tier core.Tier, allowed bool, duratio
 // RecordCircuitState records the current active state of the circuit breaker.
 // The active state is set to 1 while all other states are reset to 0.
 func (m *MetricsCollector) RecordCircuitState(state core.BreakerState) {
-	states := []core.BreakerState{core.StateClosed, core.StateOpen, core.StateHalfOpen}
-	for _, s := range states {
+	for _, s := range allBreakerStates {
 		if s == state {
 			m.breakerState.WithLabelValues(string(s)).Set(1)
 		} else {
