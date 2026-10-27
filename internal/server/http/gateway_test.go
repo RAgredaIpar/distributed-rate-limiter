@@ -138,6 +138,23 @@ func TestHTTPCheckInvalidMethod(t *testing.T) {
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 Method Not Allowed, got %d", rr.Code)
 	}
+	if allow := rr.Header().Get("Allow"); allow != http.MethodPost {
+		t.Fatalf("expected Allow header %q, got %q", http.MethodPost, allow)
+	}
+}
+
+func TestHTTPCheckPayloadTooLarge(t *testing.T) {
+	mock := &mockLimiter{}
+	handler := NewGatewayHandler(mock)
+
+	largeBody := bytes.Repeat([]byte("a"), (1<<20)+100)
+	req := httptest.NewRequest(http.MethodPost, "/v1/check", bytes.NewReader(largeBody))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for oversized payload, got %d", rr.Code)
+	}
 }
 
 func TestHTTPCheckInvalidJSON(t *testing.T) {

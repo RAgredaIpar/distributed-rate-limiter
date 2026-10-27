@@ -46,8 +46,11 @@ func main() {
 	handler := serverhttp.NewGatewayHandler(engine)
 
 	server := &http.Server{
-		Addr:    ":" + httpPort,
-		Handler: handler,
+		Addr:              ":" + httpPort,
+		Handler:           handler,
+		ReadHeaderTimeout: 3 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
 	}
 
 	go func() {
@@ -65,6 +68,9 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("Server shutdown error: %v", err)
+	}
+	if err := redisClient.Close(); err != nil {
+		log.Printf("Redis client close error: %v", err)
 	}
 	fmt.Println("Server gracefully stopped.")
 }
