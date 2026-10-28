@@ -215,3 +215,73 @@ func TestCircuitBreakerConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestCircuitBreakerHalfOpenSingleCanaryGuard(t *testing.T) {
+	clock := &mockClock{now: time.Now()}
+	cfg := BreakerConfig{
+		FailureThreshold: 3,
+		CooldownDuration: 5 * time.Second,
+	}
+
+	cb := NewCircuitBreaker(cfg, clock)
+
+	// Trip to StateOpen
+	cb.RecordFailure()
+	cb.RecordFailure()
+	cb.RecordFailure()
+	if cb.State() != core.StateOpen {
+		t.Fatalf("expected state Open, got %s", cb.State())
+	}
+
+	// Advance past cooldown duration
+	clock.Advance(6 * time.Second)
+	if cb.State() != core.StateHalfOpen {
+		t.Fatalf("expected state HalfOpen, got %s", cb.State())
+	}
+
+	// 1. First probe should be allowed as canary
+	if !cb.Allow() {
+		t.Fatal("expected first probe in HalfOpen to be allowed as canary")
+	}
+
+	// 2. Concurrent/subsequent probes while canary is in-flight must be rejected
+	for i := 0; i < 5; i++ {
+		if cb.Allow() {
+			t.Fatalf("expected concurrent probe %d to be blocked while canary in-flight", i+1)
+		}
+	}
+
+	// 3. Canary succeeds -> transitions to Closed and resets canary guard
+	cb.RecordSuccess()
+	if cb.State() != core.StateClosed {
+		t.Fatalf("expected state Closed after canary success, got %s", cb.State())
+	}
+	if !cb.Allow() {
+		t.Fatal("expected Allow()=true in Closed state")
+	}
+
+	// 4. Trip again to test failure path with canary
+	cb.RecordFailure()
+	cb.RecordFailure()
+	cb.RecordFailure()
+	if cb.State() != core.StateOpen {
+		t.Fatalf("expected state Open, got %s", cb.State())
+	}
+
+	clock.Advance(6 * time.Second)
+	if !cb.Allow() {
+		t.Fatal("expected first canary probe allowed after second cooldown")
+	}
+	if cb.Allow() {
+		t.Fatal("expected second probe blocked while canary in-flight")
+	}
+
+	// Canary fails -> trips immediately to Open and resets canary guard
+	cb.RecordFailure()
+	if cb.State() != core.StateOpen {
+		t.Fatalf("expected state Open after canary failure, got %s", cb.State())
+	}
+	if cb.Allow() {
+		t.Fatal("expected Allow()=false in Open state")
+	}
+}

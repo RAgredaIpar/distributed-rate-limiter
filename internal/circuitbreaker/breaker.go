@@ -21,6 +21,7 @@ type Breaker struct {
 	state            core.BreakerState
 	consecutiveFails int
 	lastStateChange  time.Time
+	canaryInFlight   bool
 	cfg              BreakerConfig
 	clock            core.Clock
 }
@@ -55,9 +56,18 @@ func (b *Breaker) Allow() bool {
 		if now.Sub(b.lastStateChange) >= b.cfg.CooldownDuration {
 			b.state = core.StateHalfOpen
 			b.lastStateChange = now
+			b.canaryInFlight = true
 			return true
 		}
 		return false
+	}
+
+	if b.state == core.StateHalfOpen {
+		if b.canaryInFlight {
+			return false
+		}
+		b.canaryInFlight = true
+		return true
 	}
 
 	return true
@@ -69,6 +79,7 @@ func (b *Breaker) RecordSuccess() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.canaryInFlight = false
 	b.consecutiveFails = 0
 	if b.state == core.StateHalfOpen {
 		b.state = core.StateClosed
@@ -82,6 +93,7 @@ func (b *Breaker) RecordFailure() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	b.canaryInFlight = false
 	b.consecutiveFails++
 	now := b.clock.Now()
 

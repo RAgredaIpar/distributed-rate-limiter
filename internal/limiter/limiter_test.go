@@ -3,6 +3,7 @@ package limiter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/distributed-rate-limiter/internal/circuitbreaker"
 	"github.com/distributed-rate-limiter/internal/core"
+	"github.com/distributed-rate-limiter/internal/telemetry"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 var _ core.Limiter = (*Engine)(nil)
@@ -430,4 +433,153 @@ func TestTwoTierConcurrentAllow(t *testing.T) {
 	if remotes >= 500 {
 		t.Fatalf("expected batching to reduce remote calls, but got %d", remotes)
 	}
+}
+
+func TestTwoTierEngineMetricsWiring(t *testing.T) {
+	ctx := context.Background()
+	clock := core.NewSystemClock()
+	cache := NewShardedCache(16, clock)
+	breaker := circuitbreaker.NewCircuitBreaker(circuitbreaker.BreakerConfig{}, clock)
+	store := &mockRemoteStore{
+		acquireFunc: func(ctx context.Context, key string, requestedBatch int64, capacity int64, refillRate float64, ttl time.Duration) (core.LeaseResult, error) {
+			return core.LeaseResult{
+				GrantedTokens: requestedBatch,
+				Remaining:     50,
+			}, nil
+		},
+	}
+
+	reg := prometheus.NewRegistry()
+	metrics := telemetry.NewMetricsCollectorWithRegistry(reg)
+	engine := NewEngine(cache, store, breaker, clock).WithMetrics(metrics)
+
+	// Decision 1: Remote Tier
+	dec1, err := engine.Allow(ctx, core.Request{
+		Key:       "metric:test",
+		Cost:      2,
+		Capacity:  100,
+		BatchSize: 10,
+	})
+	if err != nil || !dec1.Allowed || dec1.TierUsed != core.TierRemote {
+		t.Fatalf("unexpected decision 1: %+v, err: %v", dec1, err)
+	}
+
+	// Decision 2: Local Tier
+	dec2, err := engine.Allow(ctx, core.Request{
+		Key:       "metric:test",
+		Cost:      1,
+		Capacity:  100,
+		BatchSize: 10,
+	})
+	if err != nil || !dec2.Allowed || dec2.TierUsed != core.TierLocal {
+		t.Fatalf("unexpected decision 2: %+v, err: %v", dec2, err)
+	}
+
+	// Verify metrics were registered and gathered
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("failed to gather prometheus metrics: %v", err)
+	}
+	foundTotal := false
+	foundLatency := false
+	foundBreaker := false
+	for _, mf := range mfs {
+		switch mf.GetName() {
+		case "ratelimit_requests_total":
+			foundTotal = true
+		case "ratelimit_latency_seconds":
+			foundLatency = true
+		case "ratelimit_circuit_breaker_state":
+			foundBreaker = true
+		}
+	}
+	if !foundTotal || !foundLatency || !foundBreaker {
+		t.Fatalf("expected metric families total, latency, breaker to be gathered, got total=%v latency=%v breaker=%v",
+			foundTotal, foundLatency, foundBreaker)
+	}
+}
+
+func TestTwoTierEngineContextCancellationDoesNotTripBreaker(t *testing.T) {
+	clock := core.NewSystemClock()
+	cache := NewShardedCache(16, clock)
+	breaker := circuitbreaker.NewCircuitBreaker(circuitbreaker.BreakerConfig{
+		FailureThreshold: 2,
+	}, clock)
+
+	store := &mockRemoteStore{
+		acquireFunc: func(ctx context.Context, key string, requestedBatch int64, capacity int64, refillRate float64, ttl time.Duration) (core.LeaseResult, error) {
+			return core.LeaseResult{}, ctx.Err()
+		},
+	}
+
+	engine := NewEngine(cache, store, breaker, clock)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // canceled before call
+
+	// Run 5 requests with canceled context -> breaker should NOT trip
+	for i := 0; i < 5; i++ {
+		dec, _ := engine.Allow(canceledCtx, core.Request{
+			Key:         "tenant:cancel",
+			Cost:        1,
+			Capacity:    10,
+			BatchSize:   5,
+			Criticality: core.CriticalityStandard,
+		})
+		if dec.TierUsed != core.TierFallback {
+			t.Fatalf("expected fallback tier, got %s", dec.TierUsed)
+		}
+	}
+
+	if breaker.State() != core.StateClosed {
+		t.Fatalf("expected breaker to remain Closed after context cancellations, got %s", breaker.State())
+	}
+
+	// Now simulate actual downstream failure -> should trip on 2nd failure
+	store.acquireFunc = func(ctx context.Context, key string, requestedBatch int64, capacity int64, refillRate float64, ttl time.Duration) (core.LeaseResult, error) {
+		return core.LeaseResult{}, errors.New("redis connection refused")
+	}
+
+	_, _ = engine.Allow(context.Background(), core.Request{Key: "tenant:cancel2", Cost: 1, Capacity: 10, BatchSize: 5})
+	if breaker.State() != core.StateClosed {
+		t.Fatalf("expected breaker still closed after 1 failure, got %s", breaker.State())
+	}
+
+	_, _ = engine.Allow(context.Background(), core.Request{Key: "tenant:cancel2", Cost: 1, Capacity: 10, BatchSize: 5})
+	if breaker.State() != core.StateOpen {
+		t.Fatalf("expected breaker to trip to Open after 2 actual failures, got %s", breaker.State())
+	}
+}
+
+func BenchmarkParallelAllow(b *testing.B) {
+	clock := core.NewSystemClock()
+	cache := NewShardedCache(64, clock)
+	breaker := circuitbreaker.NewCircuitBreaker(circuitbreaker.BreakerConfig{}, clock)
+	store := &mockRemoteStore{}
+	engine := NewEngine(cache, store, breaker, clock)
+
+	const keyCount = 1024
+	keys := make([]string, keyCount)
+	for i := 0; i < keyCount; i++ {
+		keys[i] = fmt.Sprintf("tenant:bench:allow:%d", i)
+		cache.ReplenishBatch(keys[i], 1_000_000_000, time.Hour)
+	}
+
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		idx := 0
+		for pb.Next() {
+			_, _ = engine.Allow(ctx, core.Request{
+				Key:         keys[idx%keyCount],
+				Cost:        1,
+				Capacity:    1_000_000_000,
+				RefillRate:  1000,
+				BatchSize:   100,
+				Criticality: core.CriticalityStandard,
+			})
+			idx++
+		}
+	})
 }

@@ -3,13 +3,13 @@
 all: test build
 
 test:
-	go test ./... -v
+	go test ./cmd/... ./internal/... -v
 
 test-race:
-	go test ./... -v -race
+	go test ./cmd/... ./internal/... -v -race
 
 bench:
-	go test -bench=. -benchmem ./...
+	go test -bench=. -benchmem ./cmd/... ./internal/...
 
 build:
 	go build -o bin/ratelimiter cmd/server/main.go

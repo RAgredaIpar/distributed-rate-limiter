@@ -201,3 +201,25 @@ func TestShardedCacheEdgeCases(t *testing.T) {
 		t.Fatalf("expected expired tokens to be reset and new balance=15, got exists=%v tokens=%d", exists, tokens)
 	}
 }
+
+func BenchmarkShardedCacheTryConsumeLocal(b *testing.B) {
+	clock := core.NewSystemClock()
+	cache := NewShardedCache(64, clock)
+
+	const keyCount = 1024
+	keys := make([]string, keyCount)
+	for i := 0; i < keyCount; i++ {
+		keys[i] = fmt.Sprintf("tenant:bench:%d", i)
+		cache.ReplenishBatch(keys[i], 1_000_000_000, time.Hour)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		idx := 0
+		for pb.Next() {
+			cache.TryConsumeLocal(keys[idx%keyCount], 1)
+			idx++
+		}
+	})
+}

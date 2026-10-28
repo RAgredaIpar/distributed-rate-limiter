@@ -2,9 +2,11 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/distributed-rate-limiter/internal/core"
+	"github.com/distributed-rate-limiter/internal/telemetry"
 )
 
 var _ core.Limiter = (*Engine)(nil)
@@ -15,6 +17,7 @@ type Engine struct {
 	store   core.RemoteStore
 	breaker core.CircuitBreaker
 	clock   core.Clock
+	metrics *telemetry.MetricsCollector
 }
 
 // NewEngine constructs a new Engine coordinating Tier 1 and Tier 2 rate-limiting tiers.
@@ -31,9 +34,23 @@ func NewEngine(cache *ShardedCache, store core.RemoteStore, breaker core.Circuit
 	}
 }
 
+// WithMetrics attaches a telemetry metrics collector to the Engine.
+func (e *Engine) WithMetrics(m *telemetry.MetricsCollector) *Engine {
+	e.metrics = m
+	return e
+}
+
 // Allow evaluates an inbound rate-limiting request against Tier 1 (local RAM) and Tier 2 (remote store).
 // It manages circuit breaking, background refills, and hybrid fallback policies.
-func (e *Engine) Allow(ctx context.Context, req core.Request) (core.Decision, error) {
+func (e *Engine) Allow(ctx context.Context, req core.Request) (decision core.Decision, err error) {
+	start := time.Now()
+	defer func() {
+		if e.metrics != nil {
+			e.metrics.ObserveDecision(decision.TierUsed, decision.Allowed, time.Since(start))
+			e.metrics.RecordCircuitState(e.breaker.State())
+		}
+	}()
+
 	if req.Cost <= 0 {
 		req.Cost = 1
 	}
@@ -59,7 +76,7 @@ func (e *Engine) Allow(ctx context.Context, req core.Request) (core.Decision, er
 	allowed, remaining, needsRefill := e.cache.TryConsumeLocal(req.Key, req.Cost)
 	if allowed {
 		if needsRefill {
-			go e.asyncRefill(context.Background(), req)
+			go e.asyncRefill(req)
 		}
 		return core.Decision{
 			Allowed:    true,
@@ -87,7 +104,9 @@ func (e *Engine) Allow(ctx context.Context, req core.Request) (core.Decision, er
 	// 3. Try Tier 2: Remote Store (Redis Lua lease)
 	lease, err := e.store.AcquireLease(ctx, req.Key, batchSize, req.Capacity, req.RefillRate, time.Minute)
 	if err != nil {
-		e.breaker.RecordFailure()
+		if !errors.Is(err, context.Canceled) {
+			e.breaker.RecordFailure()
+		}
 		return e.handleFallback(req, err.Error())
 	}
 
@@ -121,7 +140,10 @@ func (e *Engine) Allow(ctx context.Context, req core.Request) (core.Decision, er
 	}, nil
 }
 
-func (e *Engine) asyncRefill(ctx context.Context, req core.Request) {
+func (e *Engine) asyncRefill(req core.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	if !e.breaker.Allow() {
 		e.cache.ClearRefilling(req.Key)
 		return
@@ -137,7 +159,9 @@ func (e *Engine) asyncRefill(ctx context.Context, req core.Request) {
 
 	lease, err := e.store.AcquireLease(ctx, req.Key, batchSize, req.Capacity, req.RefillRate, time.Minute)
 	if err != nil {
-		e.breaker.RecordFailure()
+		if !errors.Is(err, context.Canceled) {
+			e.breaker.RecordFailure()
+		}
 		e.cache.ClearRefilling(req.Key)
 		return
 	}

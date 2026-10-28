@@ -39,10 +39,9 @@ func main() {
 		CooldownDuration: 5 * time.Second,
 	}, clock)
 
-	// Register Prometheus metrics collector with default registry.
-	_ = telemetry.NewMetricsCollector()
-
-	engine := limiter.NewEngine(cache, store, breaker, clock)
+	// Register Prometheus metrics collector with default registry and wire into engine.
+	metrics := telemetry.NewMetricsCollector()
+	engine := limiter.NewEngine(cache, store, breaker, clock).WithMetrics(metrics)
 	handler := serverhttp.NewGatewayHandler(engine)
 
 	server := &http.Server{

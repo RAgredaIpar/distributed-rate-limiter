@@ -27,7 +27,7 @@ else
     tokens = tokens - granted
 end
 
-redis.call("HMSET", key, "tokens", tokens, "last_updated", last_updated)
+redis.call("HSET", key, "tokens", tokens, "last_updated", last_updated)
 redis.call("EXPIRE", key, ttl_seconds)
 
 local needed = requested_batch - granted
